@@ -1,20 +1,29 @@
-```yaml
-name: macOS Cloud Desktop
+name: macOS + Tailscale + Remote Desktop
 
 on:
   workflow_dispatch:
 
 jobs:
-  macos-desktop:
+  secure-macos:
     runs-on: macos-15
     timeout-minutes: 350
 
     steps:
-      - name: Configure macOS Remote Desktop
-        run: |
-          VNC_PASSWORD="${{ secrets.VNC_PASSWORD }}"
 
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+      # 1. Configure macOS Screen Sharing
+      - name: Configure macOS Remote Desktop
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
+        run: |
+          if [ -z "$VNC_PASSWORD" ] || [ ${#VNC_PASSWORD} -gt 8 ]; then
+            echo "VNC password must contain 1-8 characters."
+            exit 1
+          fi
+
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          sudo "$KICKSTART" \
             -activate \
             -configure \
             -access -on \
@@ -22,26 +31,78 @@ jobs:
             -privs -all \
             -restart -agent
 
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          sudo "$KICKSTART" \
             -configure \
             -clientopts \
             -setvnclegacy -vnclegacy yes \
             -setvncpw -vncpw "$VNC_PASSWORD"
 
+          echo "macOS Screen Sharing configured."
+
+      # 2. Establish Tailscale Connection
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Display connection information
+      # 3. Retrieve Tailscale IP
+      - name: Get Tailscale IP
+        shell: bash
         run: |
-          echo "macOS desktop is running."
-          echo "VNC port: 5900"
-          echo "Use the Tailscale IP of this machine."
-          tailscale ip -4
+          TS_IP=""
 
-      - name: Keep desktop alive
+          for i in {1..20}; do
+            TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
+
+            if [ -n "$TS_IP" ]; then
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP assignment failed."
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      # 4. Verify VNC Accessibility
+      - name: Verify Remote Desktop
+        shell: bash
         run: |
-          echo "macOS desktop is available."
-          sleep 18000
-```
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+          for i in {1..15}; do
+            if nc -z -w 5 "$TAILSCALE_IP" 5900; then
+              echo "VNC connection successful!"
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "VNC connection failed."
+          exit 1
+
+      # 5. Display Connection Information
+      - name: Display Remote Desktop Credentials
+        run: |
+          echo "================================"
+          echo "       macOS REMOTE DESKTOP"
+          echo "================================"
+          echo "Address: $TAILSCALE_IP"
+          echo "Port: 5900"
+          echo "Username: (leave blank)"
+          echo "Password: GitHub MAC_VNC_PASSWORD secret"
+          echo "================================"
+
+      # 6. Maintain Connection
+      - name: Maintain macOS Session
+        shell: bash
+        run: |
+          while true; do
+            echo "[$(date)] macOS Desktop Active"
+            sleep 300
+          done
